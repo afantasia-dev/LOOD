@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>WebAR - Integración de LUTs Avanzadas (Zero-Allocation)</title>
+    <title>WebAR - Integración de LUTs Avanzadas (Suavizado Fluido + Estabilidad WebGL)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/DRACOLoader.js"></script>
-    
+
     <!-- 🔥 LIBRERÍAS LUTs CARGADAS VÍA JSDELIVR (Evita bloqueo MIME text/plain de GitHub Raw) -->
     <script src="https://cdn.jsdelivr.net/gh/afantasia-dev/LOOD@LUTS/lut_2d_math.js"></script>
     <script src="https://cdn.jsdelivr.net/gh/afantasia-dev/LOOD@LUTS/lut_3d_avanzado.js"></script>
@@ -16,14 +16,14 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; touch-action: none; }
         body, html { width: 100%; height: 100%; overflow: hidden; background-color: #000000; position: relative; }
-        #camera-video { position: absolute; opacity: 0; pointer-events: none; z-index: -10; }
+        #camera-video { position: absolute; width: 1px; height: 1px; opacity: 0.01; pointer-events: none; z-index: -10; }
         #bg-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
         #ar-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; background: transparent; }
     </style>
 </head>
 <body class="bg-black m-0 p-0 overflow-hidden">
 
-    <video id="camera-video" playsinline autoplay muted></video>
+    <video id="camera-video" playsinline webkit-playsinline autoplay muted></video>
     <canvas id="bg-canvas"></canvas>
     <canvas id="ar-canvas"></canvas>
 
@@ -45,23 +45,32 @@
             };
         }
 
-        // Búfer estático de 2 elementos para pesos de Slerp (Zero-Allocation)
+        // Factor de suavizado rotacional y posicional (0.12 = transición cinematográfica sin tirones)
+        const POS_LERP_FACTOR = 0.14;
+        const ROT_SLERP_FACTOR = 0.12;
+
+        // Búfer estático de 2 elementos para pesos de Slerp amortiguado (Zero-Allocation)
         const _slerpWeightsOut = new Float32Array(2);
-        function getFastSlerpWeights(absDot) {
-            if (typeof LUT_SLERP_WEIGHTS !== 'undefined') {
-                const clamped = absDot > 1 ? 1 : absDot;
-                const idx = ((clamped * LUT_SLERP_STEPS) | 0) << 1;
-                _slerpWeightsOut[0] = LUT_SLERP_WEIGHTS[idx];
-                _slerpWeightsOut[1] = LUT_SLERP_WEIGHTS[idx + 1];
-            } else {
-                _slerpWeightsOut[0] = 0.75;
-                _slerpWeightsOut[1] = 0.25;
+        function getSmoothSlerpWeights(absDot) {
+            // Para ángulos muy pequeños (absDot > 0.999), usamos interpolación lineal directa
+            // evitando saltos de escalón en el borde de la tabla LUT_SLERP_WEIGHTS
+            if (absDot > 0.999 || typeof LUT_SLERP_WEIGHTS === 'undefined') {
+                _slerpWeightsOut[0] = 1.0 - ROT_SLERP_FACTOR;
+                _slerpWeightsOut[1] = ROT_SLERP_FACTOR;
+                return _slerpWeightsOut;
             }
+            const clamped = absDot < 0 ? 0 : absDot;
+            const idx = ((clamped * LUT_SLERP_STEPS) | 0) << 1;
+            // Mezclamos los pesos de la LUT (t=0.25) hacia un factor más suave (0.12) para evitar brusquedad
+            const lutW0 = LUT_SLERP_WEIGHTS[idx];
+            const lutW1 = LUT_SLERP_WEIGHTS[idx + 1];
+            _slerpWeightsOut[0] = 1.0 - (1.0 - lutW0) * 0.48;
+            _slerpWeightsOut[1] = lutW1 * 0.48;
             return _slerpWeightsOut;
         }
 
         // --- GESTIÓN DE AUDIO ---
-        const AUDIO_URL = "https://raw.githubusercontent.com/afantasia-dev/TEC2026/main/Kustatiicha.mp3";
+        const AUDIO_URL = "https://raw.githubusercontent.com/afantasia-dev/models/main/DFTR.wav";
         const bgMusic = new Audio(AUDIO_URL);
         bgMusic.loop = true; 
         let isPlaying = false;
@@ -88,7 +97,7 @@
                     const { id, width, height, buffer } = e.data;
                     const data = new Uint8ClampedArray(buffer);
                     const qr = jsQR(data, width, height, { inversionAttempts: "dontInvert" });
-                    
+
                     if (qr && qr.location) {
                         self.postMessage({ id, success: true, location: qr.location, data: qr.data });
                     } else {
@@ -101,11 +110,12 @@
         `;
         const workerUrl = URL.createObjectURL(new Blob([workerCode], { type: 'application/javascript' }));
 
-        // --- 2. PIPELINE DE 30 FPS ---
-        const SCAN_WIDTH = 540; 
-        let SCAN_HEIGHT = 960; 
+        // --- 2. PIPELINE ESTABLE (Evita saturar la RAM del móvil) ---
+        const SCAN_WIDTH = 480; 
+        let SCAN_HEIGHT = 854; 
 
-        const MAX_WORKERS = navigator.hardwareConcurrency || 4; 
+        // Limitamos a máximo 3 workers para no ahogar los núcleos de la GPU/CPU en móviles
+        const MAX_WORKERS = Math.min(navigator.hardwareConcurrency || 3, 3); 
         const workers = [], idleWorkers = [];
         let latestProcessedId = 0;
 
@@ -125,12 +135,17 @@
         }
 
         // --- 3. VARIABLES Y MEMORIA ESTÁTICA ---
-        const MI_QR_OBJETIVO = "www.afantasia.dev/mariposa"; 
+        const MI_QR_OBJETIVO = "www.afantasia.dev/rose"; 
 
         let scene = null, camera = null, renderer = null;
         let qrFloorAnchor = null, modelContainer = null;
-        let isTracked = false, lostFrames = 0;
+        let isTracked = false;
         const QR_HALF_SIZE = 0.06;
+
+        // 🔥 VARIABLES DE PERSISTENCIA (250ms = 1/4 de segundo) Y MEMORIA DEL ÚLTIMO RENDER
+        const PERSISTENCE_MS = 250;     
+        let lastSeenTime = 0;           
+        let hasEverBeenTracked = false; 
 
         const GRID_RESOLUTION = 0.001; 
         const HALF_GRID_SIZE = 2.5;    
@@ -139,7 +154,11 @@
         const targetQuat = new THREE.Quaternion();
         const calculatedPos = new THREE.Vector3();
         const calculatedQuat = new THREE.Quaternion();
-        
+
+        // Memoria estática del último estado renderizado en pantalla
+        const lastRenderedPos = new THREE.Vector3();
+        const lastRenderedQuat = new THREE.Quaternion();
+
         const invMatrix = new THREE.Matrix4();
         const relativePos = new THREE.Vector3();
         const relativeQuat = new THREE.Quaternion();
@@ -153,7 +172,7 @@
         const mat4Temp = new THREE.Matrix4();
         const _lutEuler = new THREE.Euler(0, 0, 0, 'YXZ');
         const RAD_TO_LUT_IDX = (180.0 / Math.PI) * 200.0; // Paso de 0.005°
-        
+
         const STATIC_M = new Array(8);
         for(let i=0; i<8; i++) STATIC_M[i] = new Float32Array(9);
         const STATIC_X = new Float32Array(8);
@@ -164,11 +183,10 @@
         let screenRayLUTs = null;
         const cornersBuffer = [ { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 } ];
 
-        let hasInitialPose = false;
         let mixer = null;
         const clock = new THREE.Clock(); 
 
-        const REMOTE_MODEL_RAW = "https://raw.githubusercontent.com/afantasia-dev/TEC2026/main/mariposa.glb";
+        const REMOTE_MODEL_RAW = "https://raw.githubusercontent.com/afantasia-dev/models/main/rose1.glb";
 
         const video = document.getElementById('camera-video');
         const bgCanvas = document.getElementById('bg-canvas');
@@ -176,11 +194,13 @@
         const arCanvas = document.getElementById('ar-canvas');
         const scanCanvas = document.createElement('canvas');
         const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true, alpha: false });
-        
-        let renderW, renderH, offsetX, offsetY, frameCounter = 0;
+
+        let renderW = window.innerWidth, renderH = window.innerHeight, offsetX = 0, offsetY = 0, frameCounter = 0;
+        let lastVideoW = 0, lastVideoH = 0;
         let lastDispatchTime = 0;
-        const DISPATCH_INTERVAL = 1000 / 30; 
-        
+        // 24 FPS de escaneo: evita saturar el recolector de basura con buffers de 2MB y previene cortes del renderer
+        const DISPATCH_INTERVAL = 1000 / 24; 
+
         let lastRenderTime = 0;
         const RENDER_INTERVAL = 1000 / 60; 
 
@@ -213,7 +233,13 @@
                 antialias: true, 
                 powerPreference: 'high-performance' 
             });
-            
+
+            // Protección contra pérdida de contexto WebGL en móviles
+            canvasElement.addEventListener('webglcontextlost', (e) => {
+                e.preventDefault();
+                console.warn("[WebAR] Contexto WebGL perdido, esperando restauración...");
+            }, false);
+
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             renderer.outputEncoding = THREE.sRGBEncoding;
@@ -234,7 +260,7 @@
             const lineGeo = new THREE.BufferGeometry();
             lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([-s,0,-s, s,0,-s, s,0,-s, s,0,s, s,0,s, -s,0,s, -s,0,s, -s,0,-s]), 3));
             squareGroup.add(new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({ color: 0x38bdf8, linewidth: 2 })));
-            
+
             const dotGeo = new THREE.SphereGeometry(0.003, 8, 8);
             const dotMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
             const corners = [ [-s, 0, -s], [s, 0, -s], [s, 0, s], [-s, 0, s] ];
@@ -248,6 +274,7 @@
             modelContainer = new THREE.Group();
             qrFloorAnchor.add(modelContainer);
 
+            updateCoverMath();
             loadRemoteModel();
             window.addEventListener('resize', onResize);
             requestAnimationFrame(renderLoop);
@@ -263,16 +290,18 @@
                 REMOTE_MODEL_RAW,
                 function (gltf) {
                     const model = gltf.scene;
-                    
+
                     if (gltf.animations && gltf.animations.length > 0) {
                         mixer = new THREE.AnimationMixer(model);
                         gltf.animations.forEach((clip) => mixer.clipAction(clip).play());
                     }
-                    
+
                     model.traverse((child) => {
                         if (child.isMesh) {
                             child.frustumCulled = false;
-                            if (child.geometry) child.geometry.computeVertexNormals();
+                            if (child.geometry && !child.geometry.attributes.normal) {
+                                child.geometry.computeVertexNormals();
+                            }
 
                             if (child.material) {
                                 const mats = Array.isArray(child.material) ? child.material : [child.material];
@@ -298,13 +327,13 @@
                     const center = box.getCenter(new THREE.Vector3());
                     const qrAnchoFisico = QR_HALF_SIZE * 6;
                     const maxDim = Math.max(size.x, size.z);
-                    
+
                     if (maxDim > 0) {
                         const scale = qrAnchoFisico / maxDim;
                         model.scale.set(scale, scale, scale);
                         model.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
                         modelContainer.add(model);
-                        console.log("[WebAR] Modelo mariposa.glb cargado con éxito.");
+                        console.log("[WebAR] Modelo rose1.glb cargado con éxito.");
                     }
                 },
                 undefined,
@@ -330,13 +359,13 @@
                     if (val > maxVal) { maxVal = val; maxRow = k; }
                 }
                 if (maxVal < 1e-7) return false;
-                
+
                 if (maxRow !== i) {
                     const temp = STATIC_M[i];
                     STATIC_M[i] = STATIC_M[maxRow];
                     STATIC_M[maxRow] = temp;
                 }
-                
+
                 const pivotInv = 1.0 / STATIC_M[i][i];
                 for (let k = i + 1; k < n; k++) {
                     const factor = STATIC_M[k][i] * pivotInv;
@@ -404,10 +433,9 @@
                 const rays = createScreenRayLUTs(sw, sh, f);
                 screenRayLUTs = { width: sw, height: sh, f: f, lutU: rays.lutU, lutV: rays.lutV };
             }
-            
+
             for (let i = 0; i < 4; i++) {
                 const X = ptsObjX[i], Z = ptsObjZ[i];
-                // Clamping seguro para evitar índices fuera de pantalla
                 const px = Math.max(0, Math.min(sw - 1, rawCorners[i].x | 0));
                 const py = Math.max(0, Math.min(sh - 1, rawCorners[i].y | 0));
                 const u = screenRayLUTs.lutU[px];
@@ -427,20 +455,20 @@
             }
 
             if (!solve8x8()) { handleWorkerMiss(); return; }
-            
+
             const h1x = STATIC_X[0], h1y = STATIC_X[3], h1z = -STATIC_X[6];
             const h2x = STATIC_X[1], h2y = STATIC_X[4], h2z = -STATIC_X[7];
             const h3x = STATIC_X[2], h3y = STATIC_X[5], h3z = -1.0;
-            
+
             const norm1 = Math.hypot(h1x, h1y, h1z);
             const norm2 = Math.hypot(h2x, h2y, h2z);
             if (norm1 < 1e-6 || norm2 < 1e-6) { handleWorkerMiss(); return; }
 
             const lambda = (norm1 + norm2) / 2.0;
-            
+
             rx.set(h1x / lambda, h1y / lambda, h1z / lambda).normalize();
             rz.set(h2x / lambda, h2y / lambda, h2z / lambda);
-            
+
             tempVec.copy(rx).multiplyScalar(rx.dot(rz));
             rz.sub(tempVec).normalize();
             ry.crossVectors(rz, rx).normalize();
@@ -474,22 +502,37 @@
             snapToGrid(relativePos);
             snapQuaternionLUT(relativeQuat);
 
-            if (hasInitialPose) {
+            // 🔥 Actualizar el reloj de persistencia al instante en que se lee el QR
+            lastSeenTime = performance.now();
+
+            if (!hasEverBeenTracked) {
+                qrFloorAnchor.position.copy(calculatedPos);
+                qrFloorAnchor.quaternion.copy(calculatedQuat);
+                lastRenderedPos.copy(calculatedPos);
+                lastRenderedQuat.copy(calculatedQuat);
+                targetPos.copy(calculatedPos);
+                targetQuat.copy(calculatedQuat);
+                hasEverBeenTracked = true;
+            } else {
+                if (!isTracked) {
+                    qrFloorAnchor.position.copy(lastRenderedPos);
+                    qrFloorAnchor.quaternion.copy(lastRenderedQuat);
+                }
+
+                // Evaluar por separado la zona muerta de posición (2mm) y de rotación (~0.4 grados)
+                // para que el modelo no acumule retraso ni dé latigazos al rotar en su sitio
                 const dist = targetPos.distanceTo(calculatedPos);
-                if (dist < 0.0025) return; 
-            }
+                const angleDot = Math.abs(targetQuat.dot(calculatedQuat));
 
-            targetPos.copy(calculatedPos);
-            targetQuat.copy(calculatedQuat);
-
-            if (!hasInitialPose) {
-                qrFloorAnchor.position.copy(targetPos);
-                qrFloorAnchor.quaternion.copy(targetQuat);
-                hasInitialPose = true;
+                if (dist >= 0.002 || !isTracked) {
+                    targetPos.copy(calculatedPos);
+                }
+                if (angleDot < 0.99998 || !isTracked) {
+                    targetQuat.copy(calculatedQuat);
+                }
             }
 
             qrFloorAnchor.visible = true; 
-            lostFrames = 0; 
             isTracked = true;
         }
 
@@ -511,32 +554,29 @@
         }
 
         function handleWorkerMiss() {
-            lostFrames++;
-            if (lostFrames > 8) { 
-                qrFloorAnchor.visible = false; 
-                isTracked = false; 
-                hasInitialPose = false;
-            }
+            // La persistencia de 250ms se evalúa con precisión de reloj en el renderLoop
         }
 
         function dispatchFrameToWorker() {
             const now = performance.now();
             if (now - lastDispatchTime < DISPATCH_INTERVAL) return;
 
-            if (!video || video.readyState < video.HAVE_ENOUGH_DATA) return;
+            if (!video || video.readyState < video.HAVE_ENOUGH_DATA || video.videoWidth === 0) return;
             if (idleWorkers.length === 0) return; 
 
             lastDispatchTime = now;
 
-            const sw = window.innerWidth;
-            const vw = video.videoWidth || sw, vh = video.videoHeight || window.innerHeight;
+            const vw = video.videoWidth, vh = video.videoHeight;
 
             SCAN_HEIGHT = Math.round((SCAN_WIDTH / vw) * vh);
-            if (scanCanvas.width !== SCAN_WIDTH) { scanCanvas.width = SCAN_WIDTH; scanCanvas.height = SCAN_HEIGHT; }
+            if (scanCanvas.width !== SCAN_WIDTH || scanCanvas.height !== SCAN_HEIGHT) { 
+                scanCanvas.width = SCAN_WIDTH; 
+                scanCanvas.height = SCAN_HEIGHT; 
+            }
 
             scanCtx.drawImage(video, 0, 0, SCAN_WIDTH, SCAN_HEIGHT);
             const imageData = scanCtx.getImageData(0, 0, SCAN_WIDTH, SCAN_HEIGHT);
-            
+
             const worker = idleWorkers.pop();
             frameCounter++;
 
@@ -552,7 +592,7 @@
             const sw = window.innerWidth, sh = window.innerHeight;
             const vw = video.videoWidth || sw, vh = video.videoHeight || sh;
             const screenRatio = sw / sh, videoRatio = vw / vh;
-            
+
             let scale;
             if (screenRatio > videoRatio) { 
                 renderW = sw; renderH = sw / videoRatio; offsetX = 0; offsetY = (sh - renderH) / 2; 
@@ -578,10 +618,13 @@
 
         function renderVideoToCanvas() {
             if (video.readyState >= video.HAVE_CURRENT_DATA) {
-                if (bgCanvas.width !== window.innerWidth || bgCanvas.height !== window.innerHeight) {
-                    bgCanvas.width = window.innerWidth; bgCanvas.height = window.innerHeight;
+                if (bgCanvas.width !== window.innerWidth || bgCanvas.height !== window.innerHeight || video.videoWidth !== lastVideoW || video.videoHeight !== lastVideoH) {
+                    bgCanvas.width = window.innerWidth; 
+                    bgCanvas.height = window.innerHeight;
+                    lastVideoW = video.videoWidth;
+                    lastVideoH = video.videoHeight;
+                    updateCoverMath();
                 }
-                updateCoverMath();
                 bgCtx.drawImage(video, offsetX, offsetY, renderW, renderH);
             }
         }
@@ -595,43 +638,57 @@
 
         function renderLoop(currentTime) { 
             requestAnimationFrame(renderLoop); 
-            
+
             const elapsed = currentTime - lastRenderTime;
             if (elapsed < RENDER_INTERVAL) return;
-            
+
             lastRenderTime = currentTime - (elapsed % RENDER_INTERVAL);
 
             renderVideoToCanvas(); 
             dispatchFrameToWorker(); 
-            
+
             const delta = clock.getDelta();
 
             if (mixer) {
                 mixer.update(delta);
             }
 
-            if (isTracked && hasInitialPose) {
-                qrFloorAnchor.position.lerp(targetPos, 0.25);
+            if (isTracked && hasEverBeenTracked) {
+                const now = performance.now();
 
-                // 🔥 Slerp por LUT con manejo de hemisferio (signo del producto punto) y Zero-Allocation
-                let dot = qrFloorAnchor.quaternion.dot(targetQuat);
-                let sign = 1.0;
-                if (dot < 0.0) {
-                    dot = -dot;
-                    sign = -1.0;
+                // 🔥 Si pasa más de un cuarto de segundo (250ms) sin poder leer el QR,
+                // se oculta el render, pero lastRenderedPos y lastRenderedQuat quedan guardados
+                if (now - lastSeenTime > PERSISTENCE_MS) {
+                    qrFloorAnchor.visible = false;
+                    isTracked = false;
+                } else {
+                    // Interpolación suave de posición (0.14)
+                    qrFloorAnchor.position.lerp(targetPos, POS_LERP_FACTOR);
+
+                    // 🔥 Slerp amortiguado por LUT con manejo de hemisferio y transición fina en ángulos cortos
+                    let dot = qrFloorAnchor.quaternion.dot(targetQuat);
+                    let sign = 1.0;
+                    if (dot < 0.0) {
+                        dot = -dot;
+                        sign = -1.0;
+                    }
+
+                    const weights = getSmoothSlerpWeights(dot);
+                    const w0 = weights[0];
+                    const w1 = weights[1] * sign;
+
+                    qrFloorAnchor.quaternion.x = qrFloorAnchor.quaternion.x * w0 + targetQuat.x * w1;
+                    qrFloorAnchor.quaternion.y = qrFloorAnchor.quaternion.y * w0 + targetQuat.y * w1;
+                    qrFloorAnchor.quaternion.z = qrFloorAnchor.quaternion.z * w0 + targetQuat.z * w1;
+                    qrFloorAnchor.quaternion.w = qrFloorAnchor.quaternion.w * w0 + targetQuat.w * w1;
+                    qrFloorAnchor.quaternion.normalize();
+
+                    // Guardar el estado actual como el último render registrado
+                    lastRenderedPos.copy(qrFloorAnchor.position);
+                    lastRenderedQuat.copy(qrFloorAnchor.quaternion);
+
+                    qrFloorAnchor.visible = true;
                 }
-
-                const weights = getFastSlerpWeights(dot);
-                const w0 = weights[0];
-                const w1 = weights[1] * sign;
-                
-                qrFloorAnchor.quaternion.x = qrFloorAnchor.quaternion.x * w0 + targetQuat.x * w1;
-                qrFloorAnchor.quaternion.y = qrFloorAnchor.quaternion.y * w0 + targetQuat.y * w1;
-                qrFloorAnchor.quaternion.z = qrFloorAnchor.quaternion.z * w0 + targetQuat.z * w1;
-                qrFloorAnchor.quaternion.w = qrFloorAnchor.quaternion.w * w0 + targetQuat.w * w1;
-                qrFloorAnchor.quaternion.normalize();
-
-                qrFloorAnchor.visible = true;
             }
 
             if (renderer && scene && camera) renderer.render(scene, camera); 
