@@ -17,12 +17,6 @@ export function setupARTracker(scene, modelContainer, getViewportInfo, targetQrV
         };
     }
 
-    if (typeof window.lutMultInverse === 'undefined') {
-        window.lutMultInverse = function(pivot) {
-            return Math.abs(pivot) > 1e-8 ? 1.0 / pivot : 10000.0;
-        };
-    }
-
     const _slerpWeightsOut = new Float32Array(2);
     function getFastSlerpWeights(absDot) {
         if (typeof LUT_SLERP_WEIGHTS !== 'undefined' && typeof LUT_SLERP_STEPS !== 'undefined') {
@@ -172,7 +166,7 @@ export function setupARTracker(scene, modelContainer, getViewportInfo, targetQrV
                 STATIC_M[maxRow] = temp;
             }
 
-            const pivotInv = window.lutMultInverse(STATIC_M[i][i]);
+            const pivotInv = 1.0 / STATIC_M[i][i];
             for (let k = i + 1; k < n; k++) {
                 const factor = STATIC_M[k][i] * pivotInv;
                 for (let j = i; j <= n; j++) {
@@ -186,7 +180,7 @@ export function setupARTracker(scene, modelContainer, getViewportInfo, targetQrV
             for (let j = i + 1; j < n; j++) {
                 sum -= STATIC_M[i][j] * STATIC_X[j];
             }
-            STATIC_X[i] = sum * window.lutMultInverse(STATIC_M[i][i]);
+            STATIC_X[i] = sum / STATIC_M[i][i];
         }
         return true;
     }
