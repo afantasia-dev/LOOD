@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>WebAR - Motor Modular con Configuración Centralizada</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/DRACOLoader.js"></script>
+
+    <!-- LIBRERÍAS LUTs EXTERNAS (Cargadas vía jsDelivr para evitar bloqueo MIME text/plain) -->
+    <script src="https://cdn.jsdelivr.net/gh/afantasia-dev/LOOD@LUTS/lut_2d_math.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/afantasia-dev/LOOD@LUTS/lut_3d_avanzado.js"></script>
+
+    <link rel="stylesheet" href="./css/main.css">
+</head>
+<body class="bg-black m-0 p-0 overflow-hidden">
+
+    <video id="camera-video" playsinline autoplay muted></video>
+    <canvas id="bg-canvas"></canvas>
+    <canvas id="ar-canvas"></canvas>
+
+    <button id="audio-btn" class="fixed bottom-6 left-6 z-[100] bg-purple-600 text-white w-14 h-14 flex items-center justify-center rounded-full shadow-lg border-2 border-white/20 active:scale-95 transition-all text-2xl">
+        🎵
+    </button>
+
+    <!-- Módulo principal coordinador -->
+    <script type="module" src="./js/main.js"></script>
+</body>
+</html>
