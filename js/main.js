@@ -9,7 +9,7 @@ const WebARConfig = {
     // URL del modelo GLB (cargado desde CDN de GitHub usando jsDelivr para máximo rendimiento)
     modelUrl: "https://cdn.jsdelivr.net/gh/afantasia-dev/TEC2026@main/mariposa.glb",
     
-    // URL del Audio MP3
+    // URL del Audio MP3 / WAV
     audioUrl: "https://cdn.jsdelivr.net/gh/afantasia-dev/TEC2026@main/Kustatiicha.mp3",
     
     // El texto o URL exacto que contiene tu código QR físico (dejar "" para aceptar cualquiera)
